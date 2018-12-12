@@ -66,10 +66,12 @@ then
  exit
 fi
 
-drels=$(grep DISTRIB_RELEASE /etc/lsb-release|cut -d = -f 2)
+lsb=$(grep -lir ID=.*buntu /etc/*release) 
+drels=$(grep -r DISTRIB_RELEASE $lsb|cut -d = -f 2)
 drels=${drels//.}
 
-grep -i ID=.*buntu /etc/*release > /dev/null
+#Added -r to support derivative releases (elementary OS)
+grep -ir ID=.*buntu /etc/*release > /dev/null
 if [ $? -ne 0 ] || [ $drels -lt ${minrel//.} ]
 then
  cat /etc/lsb-release
