@@ -1,0 +1,397 @@
+#!/bin/bash
+
+#       Copyright 2015 Nio Wiklund alias sudodus
+#
+#       GPLv3: GNU GPL version 3 <http://gnu.org/licenses/gpl.html>.
+#
+#       This  is  free  software: you are free to change and redistribute it.
+#       There is NO WARRANTY, to the extent permitted by law.
+#
+#       This scipt is developed from the method developed by
+#       Andre Rodovalho alias sysmatck in the Ubuntu Forums
+#       http://ubuntuforums.org/showthread.php?t=2276498
+#       and uses the file 'usb-pack_efi.zip' developed by him.
+#
+#
+# date        sign     comment
+# 2015-06-11  sudodus  created to make boot drives for BIOS and UEFI
+# 2015-06-11  sudodus  version 1.0
+# 2015-06-19  sudodus  set boot flag on partition 1 (for HP computers)
+# 2015-06-19  sudodus  version 1.0.1
+# 2015-06-25  sudodus  separate ext4 partition for the iso files
+# 2015-06-25  sudodus  changed to ext4 for the casper-rw partition
+# 2015-06-26  sudodus  made the isotest option to manage the iso files
+#                      using the script links2check (and mkusb-nox to
+#                      install iso files that do not boot via grub-n-iso)
+# 2015-06-26  sudodus  version 1.1
+# 2015-07-24  sudodus  links2update to simplify updating iso files
+# 2015-07-24  sudodus  version 1.2
+
+
+
+version=1.2
+
+minrel=14.04
+inversvid="\0033[7m"
+resetvid="\0033[0m"
+inst=0
+mkdir -p /tmp/looper
+mkdir -p /tmp/monter
+mkdir -p /tmp/target
+mkdir -p /tmp/isotrg
+
+if [ "$1" == "-v" ]
+then
+ echo "mk-grub-n-iso $version"
+ exit
+fi
+
+if [ "$3" == "isotest" ]
+then
+ parcnt=$(($# -1))
+else
+ parcnt=$#
+fi
+
+if [ $parcnt -ne 2 ] || [ "$USER" != "root" ] || [ "$1" == "-h" ]
+then
+ echo "Usage:   sudo $0 <source.iso> <target device> [isotest]"
+ echo "Example: sudo $0 ubuntu.iso /dev/sdx"
+ echo "Example: sudo $0 multiboot /dev/sdx"
+ echo "Example: sudo $0 lubuntu.iso /dev/sdx isotest"
+ echo ""
+ echo "Try again with the correct target device according to the list below"
+ echo ""
+ lsblk -o MODEL,NAME,FSTYPE,LABEL,MOUNTPOINT,SIZE
+ exit
+fi
+
+drels=$(grep DISTRIB_RELEASE /etc/lsb-release|cut -d = -f 2)
+drels=${drels//.}
+
+grep -i ID=.*buntu /etc/*release > /dev/null
+if [ $? -ne 0 ] || [ $drels -lt ${minrel//.} ]
+then
+ cat /etc/lsb-release
+ echo "---------------------------------------------------------------------------"
+ echo "$0 cannot make the grub-n-iso system boot in UEFI mode from"
+ echo "this version. You should use version $minrel or newer of"
+ echo "Ubuntu or an Ubuntu flavour (Kubuntu, Lubuntu, ... Xubuntu.)"
+ echo "---------------------------------------------------------------------------"
+ read -p "Do you want to try to make a system only for BIOS mode? (y/n) " ans
+ if [ "$ans" != "y" ]
+ then
+  exit
+ fi
+fi
+
+if test -f "$1" && [ "${1/.iso}.iso" == "$1" ]
+then
+ echo "'$1' is identified as the source ISO file"
+ if [ "$3" == "isotest" ]
+ then
+  echo "---------------------------------------------------------------------------"
+  echo "links2check & links2update: iso files of the current developing version can"
+  echo "be managed (downloaded and upgraded) in a multi-boot type pendrive."
+  echo "Select a stable system (released version) to have a working system"
+  echo "even if the developing version is broken for a period of time!"
+  echo ""
+  echo "When installed and running from the 'grub-n-iso' pendrive,"
+  echo "change directory to '/isodevice' and run 'links2check'"
+  echo ""
+  echo "sudo -H ./links2check"
+  echo "sudo -H ./links2update"
+  echo "---------------------------------------------------------------------------"
+ fi
+
+elif [ "$1" == "multiboot" ]
+then
+ echo "multi-boot: all iso files in the current directory will be used"
+ ls -1 *.iso
+ /bin/echo -e "$inversvid WARNING: $resetvid the target device will be wiped and re-partitioned"
+ sleep 3
+else
+ echo "'$1' does not work as a source ISO file"
+ exit
+fi
+
+if ! test -b "$2"
+then
+ echo "'$2' does not work as a target device"
+ exit
+fi
+echo ""
+lsblk -o MODEL,NAME,FSTYPE,LABEL,MOUNTPOINT,SIZE "$2"
+echo ""
+
+read -p "Go ahead and overwrite $2 ? (g/q) " ans
+if [ "$ans" != "g" ]
+then
+ exit
+fi
+
+if test -f grub.cfg
+then
+ echo "Using 'grub.cfg' in the current directory"
+else
+ echo "'grub.cfg' not found in the current directory"
+ exit
+fi
+
+if test -f usb-pack_efi.zip || test -d usb-pack_efi
+then
+ echo "Using 'usb-pack_efi' in the current directory"
+else
+ echo "'usb-pack_efi.zip' not found in the current directory"
+ exit
+fi
+
+source="$1"
+
+umount /tmp/target 2> /dev/null
+umount /tmp/isotrg 2> /dev/null
+part="${2}1"
+#umount  "$part"
+#df|grep "$part"
+umount  ${2}? 2> /dev/null
+df|grep ${2}
+if [ $? -eq 0 ]
+then
+ echo "Cannot unmount a partition on the target device"
+ exit
+fi
+
+ans=
+if [ "$1" == "multiboot" ]
+then
+ ans=c
+fi
+while [ "$ans" != "c" ] && [ "$ans" != "a" ]
+do
+ echo "---------------------------------------------------------------------------"
+ read -p "Create new system or Add new iso file? (c/a)? " ans
+done 
+
+/bin/echo -en "$inversvid FINAL WARNING: $resetvid Are you sure $2 ? (y/n) "
+read finans
+if [ "$finans" != "y" ]
+then
+ exit
+fi
+
+fat32="$inversvid fat32 $resetvid"
+ext4="$inversvid ext4 $resetvid"
+size64="$inversvid 64 $resetvid"
+if [ "$ans" == "c" ]
+then
+ dd if=/dev/zero of="$2" bs=1024 count=1024
+
+ if [ "$1" == "multiboot" ]
+ then
+  bytes=$(wc -c *.iso|tail -n1|cut -d ' ' -f1)
+ else
+  bytes=$(wc -c "$source"|tail -n1|cut -d ' ' -f1)
+ fi
+
+#  add {5 % for diff filesize disk-space} + 50 Mibybytes
+ 
+# mibib=$(( bytes/1024/1024 * 105/100 + 50)) # simplified -->
+ mibib=$(( bytes/1000000 + 50))
+ mibib="$inversvid $mibib $resetvid"
+ echo "---------------------------------------------------------------------------"
+ echo "     Use gparted and create an msdos partition table"
+ echo "---------------------------------------------------------------------------"
+ echo "Suggested values, may be changed according to the size of"
+ echo "$source"
+ /bin/echo -e "${2}1:  file system=$fat32  size=$size64 Mibibytes for the grub files"
+ /bin/echo -e "${2}2:  file system=$ext4  size=$mibib Mibibytes or more* for iso files"
+ /bin/echo -e "${2}3:  file system=$ext4  size=the rest of device for persistence"
+ echo "*) If you want to update the iso file here, you should have space for a"
+ echo "   temporary iso file while updating, so approximately an extra Gibibyte."
+ echo "   You might also reserve space for installing more iso files later on."
+else
+ echo "---------------------------------------------------------------------------"
+ echo "     Use gparted to check (and maybe change) the partitions"
+ echo "---------------------------------------------------------------------------"
+ echo " The following iso files are found in the target drive:"
+ mount "$part" /tmp/target
+ mount "${2}2" /tmp/isotrg
+ for i in /tmp/isotrg/*.iso
+ do
+  if [ "${i##*/}" == "${source##*/}" ]
+  then
+   echo "${i##*/}  is already installed."
+   inst=1
+  else
+   echo "${i##*/}"
+  fi
+ done
+ sleep 1
+ umount "$part"
+fi
+if [ $inst -eq 1 ]
+then
+ echo "Exiting. Add another iso file!"
+ exit
+fi
+
+sleep 2
+which gparted > /dev/null
+if [ $? -ne 0 ]
+then
+ echo "Installing gparted from the Ubuntu repositories"
+ sudo apt-get install gparted
+fi
+gparted "$2" 2> gparted-error.log
+
+persist=$(grep -m1 boot= grub.cfg|sed s/.*boot=//|sed s/\ .*//)
+
+if [ "$1" == "multiboot" ] || [ "$ans" == "a" ]
+then
+ label="multiboot"
+else
+ label="${source##*/}"
+ label="${label/edubuntu/edu}"
+ label="${label/kubuntu/kub}"
+ label="${label/lubuntu/lub}"
+ label="${label/mythbuntu/myb}"
+ label="${label/ubuntu-desktop-next/unx}"
+ label="${label/ubuntu-gnome/ugn}"
+ label="${label/ubuntu-mate/umt}"
+ label="${label/server-i386/s32}"
+ label="${label/server-amd64/s64}"
+ label="${label/ubuntukylin/uky}"
+ label="${label/ubuntustudio/ust}"
+ label="${label/xubuntu/xub}"
+ label="${label/ubuntu/ubu}"
+
+ label=$(echo "$label"|sed -e s/desktop// -e s/untu// -e s/LTS// -e s/\\.//g \
+ -e s/-//g -e s/amd64/-64/ -e s/i386/-32/ -e s/iso//)
+fi
+
+parted "$2" set 1 boot on  # set boot flag on partition 1
+dosfslabel "$part" "$label"
+tune2fs -L "isodevice" "${2}2"
+tune2fs -L "${persist}-rw" "${2}3"
+tune2fs -O ^has_journal "${2}3"
+
+if [ "$1" == "multiboot" ]
+then
+ source=*.iso
+fi
+echo "---------------------------------------------------------------------------"
+echo "source=$source"
+echo "---------------------------------------------------------------------------"
+
+#mkdir -p /tmp/target
+mount "$part" /tmp/target
+mount "${2}2" /tmp/isotrg
+/bin/echo -n "UEFI Bootloader:  "
+grub-install --force --removable --no-floppy --boot-directory=/tmp/target/boot --efi-directory=/tmp/target/EFI/BOOT "$2"
+/bin/echo -n "BIOS Bootloader:  "
+grub-install --force --removable --no-floppy --boot-directory=/tmp/target/boot "$2"
+
+echo "Copying files ..."
+
+# extract and copy Andre's zip-file (except grub.cfg and ini/)
+
+if ! test -d usb-pack_efi
+then
+ unzip usb-pack_efi.zip
+fi
+rsync --exclude={grub.cfg,iso} -Hav usb-pack_efi/ /tmp/target
+
+# tweak grub.cfg
+
+if ! test -f /tmp/target/boot/grub/grub.cfg
+then
+ < grub.cfg sed '2'q > /tmp/target/boot/grub/grub.cfg  # copy two first lines
+fi
+
+error=0
+for i in $source
+do
+ # append the rest of the file (after two first lines)
+ 
+ mount -o loop "$i" /tmp/looper
+ vmlinuz=$(ls -1 /tmp/looper/casper/|grep vmlinuz)
+
+ < grub.cfg sed -e '1,2'd \
+ -e "s%ubuntu.iso%${i##*/}%g" -e "s/vmlinuz/$vmlinuz/" \
+ -e '/menuentry/a \ set root=(hd0,2)' -e '/menuentry/s/"./\U&/' \
+ >> /tmp/target/boot/grub/grub.cfg
+
+# copy files for managing iso-testing
+
+ if [ "$3" == "isotest" ]
+ then
+  cp -v grub.cfg links2check links2update mkusb-nox /tmp/isotrg
+ fi
+
+# copy the iso file(s)
+
+ which pv > /dev/null 2> /dev/null
+ if [ $? -eq 0 ]
+ then
+  echo "< $i pv > /tmp/isotrg/${i##*/}"
+  < "$i" pv > /tmp/isotrg/"${i##*/}"
+  if [ $? != 0 ]
+  then
+   error=pv
+  fi
+ else
+  cp -v "$i" /tmp/isotrg
+  if [ $? != 0 ]
+  then
+   error=cp
+  fi
+ fi
+ umount /tmp/looper
+done
+chmod ugo+r /tmp/target/boot/grub/grub.cfg
+
+if [ "$error" != "0" ]
+then
+ echo "Too small partition: '$source'"
+ echo "'$error' could not finish copying the iso file(s)"
+fi
+chmod ugo+r /tmp/isotrg/${source##*/}
+
+sync
+echo "Syncing the target device ..."
+
+# final tasks
+
+inst=0
+for i in /tmp/isotrg/*.iso
+do
+ inst=$((inst+1))
+done
+if [ $inst -gt 1 ]
+then 
+ echo " The following iso files are found in the target drive:"
+ ls -1 /tmp/isotrg/*.iso
+ echo "---------------------------------------------------------------------------"
+fi
+sleep 1
+umount /tmp/monter /tmp/looper /tmp/target /tmp/isotrg 2> /dev/null
+rmdir /tmp/monter /tmp/looper /tmp/target /tmp/isotrg
+if [ $? -eq 0 ]
+then
+ lsblk -o MODEL,NAME,FSTYPE,LABEL,MOUNTPOINT,SIZE "$2"
+ echo "The target device is ready to use."
+ echo "'$source' was installed"
+ if [ "$3" == "isotest" ]
+ then
+  echo ""
+  echo "When installed and running from the 'grub-n-iso' pendrive,"
+  echo "change directory to '/isodevice' and run 'links2check'"
+  echo "and 'links2update'"
+  echo ""
+  echo "sudo -H ./links2check"
+  echo "sudo -H ./links2update"
+  echo ""
+ fi
+else
+ echo "Could not unmount the target device. Try manually!"
+fi

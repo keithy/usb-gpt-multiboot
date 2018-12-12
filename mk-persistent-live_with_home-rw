@@ -1,0 +1,577 @@
+#!/bin/bash
+
+#       Copyright 2018 Nio Wiklund alias sudodus
+#
+#       GPLv3: GNU GPL version 3 <http://gnu.org/licenses/gpl.html>.
+#
+#       This  is  free  software: you are free to change and redistribute it.
+#       There is NO WARRANTY, to the extent permitted by law.
+#
+#       This scipt is developed from the method developed by
+#       Andre Rodovalho alias sysmatck in the Ubuntu Forums
+#       http://ubuntuforums.org/showthread.php?t=2276498
+#       and uses the file 'usb-pack_efi.zip' developed by him.
+#
+#
+# date        sign     comment
+# 2015-06-11  sudodus  created to make boot drives for BIOS and UEFI
+# 2015-06-11  sudodus  version 1.0
+# 2015-06-19  sudodus  set boot flag on partition 1 (for HP computers)
+# 2015-06-19  sudodus  version 1.0.1
+# 2015-06-25  sudodus  separate ext4 partition for the iso files
+# 2015-06-25  sudodus  changed to ext4 for the casper-rw partition
+# 2015-06-26  sudodus  made the isotest option to manage the iso files
+#                      using the script links2check (and mkusb-nox to
+#                      install iso files that do not boot via grub-n-iso)
+# 2015-06-26  sudodus  version 1.1
+# 2015-07-24  sudodus  links2update to simplify updating iso files
+# 2015-07-24  sudodus  version 1.2
+# ----------------------------------------------------------------------
+# 2018-04-30  sudodus  created mk-persistent-live_with_home-rw
+#                      'casper-rw' and 'home-rw' for persistence
+#                      create mode and upgrade mode:
+#                      upgrade wipes 'casper-rw' and preserves 'home-rw'
+# 2018-04-30  sudodus  version 1.0
+# 2018-05-01  sudodus  sudo -H gparted "$2" 2>> /dev/null
+# 2018-05-04  sudodus  1. check partition table pipe via head (truncated)
+#                      2. clone instead of create head of target drive
+#                      including first partition
+#                      3. several tweaks to avoid problems when some distros
+#                      automount partitions while this script is working
+# 2018-05-04  sudodus  version 1.0.1
+
+version=1.0.1
+
+minrel=14.04
+
+LANG=C
+inversvid="\0033[7m"
+resetvid="\0033[0m"
+redback="\0033[1;37;41m"
+greenback="\0033[1;37;42m"
+inst=0
+
+# temporary directories
+
+mkdir -p /tmp/looper
+mkdir -p /tmp/monter
+mkdir -p /tmp/target
+mkdir -p /tmp/isotrg
+
+# version and help
+
+if [ "$1" == "-v" ]
+then
+ echo "mk-grub-n-iso $version"
+ exit
+fi
+
+parcnt=$#
+
+if [ $parcnt -ne 2 ] || [ "$USER" != "root" ] || [ "$1" == "-h" ]
+then
+ echo "
+Usage:   sudo $0 <source.iso> <target device>
+Example: sudo $0 ubuntu.iso /dev/sdx
+
+This shellscript '$0'
+
+can create and upgrade persistent live drives with two partitions for
+persistence, 'casper-rw' for system data and 'home-rw' for the home data.
+
+It works only with iso files of Ubuntu Desktop, Ubuntu community flavours,
+and maybe some linux distros and respins with the same boot structure.
+
+Try again with the correct target device according to the list below
+"
+
+ read -p "Press Enter to continue"
+ lsblk -o MODEL,NAME,FSTYPE,LABEL,MOUNTPOINT,SIZE
+ echo -e "$inversvid Example: sudo $0 ubuntu.iso /dev/sdx $resetvid"
+ exit
+fi
+
+# check release
+
+drels=$(grep DISTRIB_RELEASE /etc/lsb-release|cut -d = -f 2)
+drels=${drels//.}
+
+grep -i ID=.*buntu /etc/*release > /dev/null
+if [ $? -ne 0 ] || [ $drels -lt ${minrel//.} ]
+then
+ cat /etc/lsb-release
+ echo "---------------------------------------------------------------------------"
+ echo "$0 cannot make the grub-n-iso system boot in UEFI mode from"
+ echo "this version. You should use version $minrel or newer of"
+ echo "Ubuntu or an Ubuntu flavour (Kubuntu, Lubuntu, ... Xubuntu.)"
+ echo "---------------------------------------------------------------------------"
+ ans=
+ read -p "Do you want to try to make a system only for BIOS mode? (y/n) " ans
+ if [ "$ans" != "y" ]
+ then
+  exit
+ fi
+fi
+
+# check source and target
+
+if test -f "$1" && [ "${1/.iso}.iso" == "$1" ]
+then
+ echo "'$1' is identified as the source ISO file"
+else
+ echo "'$1' does not work as a source ISO file"
+ exit
+fi
+
+echo ""
+lsblk -o MODEL,NAME,FSTYPE,LABEL,MOUNTPOINT,SIZE "$2"
+if [ $? -ne 0 ]
+then
+ echo "'$2' does not work as a target device.
+Check that it is connected correctly."
+ exit
+fi 
+echo ""
+
+# check help files
+
+if test -f grub.cfg
+then
+ echo "Using 'grub.cfg' in the current directory"
+else
+ echo "'grub.cfg' not found in the current directory"
+ exit
+fi
+
+if test -f usb-pack_efi.zip || test -d usb-pack_efi
+then
+ echo "Using 'usb-pack_efi' in the current directory"
+else
+ echo "'usb-pack_efi.zip' not found in the current directory"
+ exit
+fi
+
+source="$1"
+
+# unmount
+
+umount /tmp/target 2> /dev/null
+umount /tmp/isotrg 2> /dev/null
+part="${2}1"
+#umount  "$part"
+#df|grep "$part"
+umount  ${2}?* 2> /dev/null
+df|grep ${2}
+if [ $? -eq 0 ]
+then
+ echo "Cannot unmount a partition on the target device"
+ exit
+fi
+
+# go ahead?
+
+echo "-------------------------------------------------------------------------
+Did you check and if necessary copy any valuable files from
+the device '$2' before re-using it as a persistent live drive?
+
+Are ready to go ahead and overwrite '$2'?"
+
+# check if usb or mmcblk device
+
+trg="${2##*/}"
+
+hpl=$(ls -l /dev/disk/by-id|grep -m1 "$trg"$|tr -s ' ' '\t'|cut -f 9|cut -b 1-3)
+#echo "hpl=$hpl"
+if [ "$hpl" == "usb" ] || [ "$hpl" == "mmc" ]
+then
+ hpl=1
+else
+ hpl=0
+
+ echo -e "$inversvid '$2' is not a USB drive or memory card. Please check again! $resetvid"
+ read -p "Do you really want to overwrite this target device? (y/N) " ans
+ if [ "$ans" != "y" ]
+ then
+  rm -r /tmp/monter /tmp/looper /tmp/target /tmp/isotrg
+  exit
+ fi
+fi
+
+# select working mode: new or upgrade
+
+ans=
+while [ "$ans" != "c" ] && [ "$ans" != "u" ] && [ "$ans" != "q" ]
+do
+ echo "-------------------------------------------------------------------------"
+ read -p "Create new system or Upgrade with new iso file or Quit? (c/u/q)? " ans
+done 
+
+if [ "$ans" == "c" ]
+then
+ choice=Create
+ auto=
+ echo -e "$inversvid Automatic or manual selection of partition sizes $resetvid"
+ while [ "$auto" != "a" ] && [ "$auto" != "m" ]
+ do
+  read -p "Automatic or Manual? (a/m) " auto
+ done
+elif [ "$ans" == "u" ]
+then
+ choice=Upgrade
+elif [ "$ans" == "q" ]
+then
+ rm -r /tmp/monter /tmp/looper /tmp/target /tmp/isotrg
+ exit
+fi
+
+# final checkpoint
+
+finans=
+while [ "$finans" != "y" ] && [ "$finans" != "n" ]
+do
+ str1="$redback Final checkpoint $resetvid"
+ str2="$inversvid $choice '$2' $resetvid"
+ /bin/echo -en "${str1}${str2}$redback Are you sure? (y/n) $resetvid "
+ read finans
+done
+if [ "$finans" != "y" ]
+then
+ rm -r /tmp/monter /tmp/looper /tmp/target /tmp/isotrg
+ exit
+fi
+
+# calculate partition sizes
+
+fat32="$inversvid fat32 $resetvid"
+ext4="$inversvid ext4 $resetvid"
+size64="$inversvid 64 $resetvid"
+
+# add 500 megabytes to real size to have margin for growing iso files
+#
+# limit 1: 2.0 Gib, 2048 MiB in gparted, mibib=2148
+# limit 2: 2.5 GiB, 2560 MiB in gparted, mibib=2685
+
+sbytes=$(wc -c "$source"|tail -n1|cut -d ' ' -f1)
+mibib=$(( sbytes/1000000 + 500 ))
+
+dbytes=$(sudo lsblk -bdn -o size "$2")
+
+dibib=$(( dbytes/1000000 ))
+#echo "$dibib"
+
+if [ $dibib -gt 30000 ] && [ $mibib -lt 2685 ]
+then
+  mibib=2685
+elif [ $dibib -gt 15000 ] && [ $mibib -lt 2148 ]
+then
+  mibib=2148
+elif [ $dibib -lt 7000 ]
+then
+  echo "This tool will not work well on drives smaller than 8 GB, because
+the drive space will not be used in an efficient way when split into two
+partitions for persistence.
+
+It is better to use only 'casper-rw' and skip 'home-rw'.
+
+Please use 'mkusb' (mkusb-dus) instead of this tools"
+ exit
+fi
+mibitxt="$inversvid $(( mibib*1000000/1024/1024 )) $resetvid"
+
+
+#echo "mibib=$mibib"
+#echo -e "mibitxt=$mibitxt"
+
+if [ "$ans" == "c" ]
+then
+# ----------------------------------------------------------------------
+# create: wipe and then create MSDOS partition table
+# ----------------------------------------------------------------------
+
+# extract from a compressed image to the head end of the drive
+
+ < head-end-with-grub.img.xz xzcat | dd of="$2" bs=4096
+
+# dd if=/dev/zero of="$2" bs=4096 count=512
+# sync
+# partprobe "$2" 2> /tmp/partprobe
+# sleep 1
+# parted -s "$2" mklabel msdos
+# sync
+# partprobe "$2" 2> /tmp/partprobe
+# sleep 1
+# uplim=67       # size 66 MB <---> 63 MiB --> alignment for next partitions
+# parted -sa optimal "$2" mkpart primary 1MB ${uplim}MB
+# sync
+# partprobe "$2" 2> /tmp/partprobe
+# sleep 1
+# mkfs.vfat -v -F 32 "${2}1"
+# sync
+
+ uplim=67
+ partprobe "$2" 2> /tmp/partprobe
+ sleep 1
+ 
+# selecting sizes of the partitions automatically or manually
+
+ if [ "$auto" == "a" ]
+ then
+  lolim=$uplim
+  uplim=$(( lolim + mibib ))
+  parted -sa optimal "$2" mkpart primary ${lolim}MB ${uplim}MB
+  sync
+  partprobe "$2" 2> /tmp/partprobe
+
+  lolim=$uplim
+  uplim=$(( lolim + dibib/4 + 500 ))
+  parted -sa optimal "$2" mkpart primary ${lolim}MB ${uplim}MB
+  sync
+  partprobe "$2" 2> /tmp/partprobe
+
+  lolim=$uplim
+  parted -sa optimal "$2" mkpart primary ${lolim}MB 100%
+  sync
+  partprobe "$2" 2> /tmp/partprobe
+
+  sleep 1
+  dd if=/dev/zero of="${2}2" bs=4096 count=256
+  dd if=/dev/zero of="${2}3" bs=4096 count=256
+  dd if=/dev/zero of="${2}4" bs=4096 count=256
+  sync
+  sleep 1
+  mkfs.ext4 "${2}2"
+  sleep 1
+  mkfs.ext4 "${2}3"
+  sleep 1
+  mkfs.ext4 "${2}4"
+  sleep 1
+  echo "---------------------------------------------------------------------------"
+  echo "     Use gparted to check (and maybe change) the partitions"
+  echo "---------------------------------------------------------------------------"
+ else 
+# tell the user what to do in gparted
+
+  echo "---------------------------------------------------------------------------"
+  echo "     Use gparted and create an msdos partition table"
+  echo "---------------------------------------------------------------------------"
+  echo "Suggested values, may be changed according to the size of"
+  echo "$source"
+  /bin/echo -e "${2}1:  file system=$fat32  size=$size64 Mibibytes for the grub files"
+  /bin/echo -e "${2}2:  file system=$ext4  size=$mibitxt Mibibytes or more for the iso file"
+  /bin/echo -e "${2}3:  file system=$ext4  size=$mibitxt Mibibytes or more for system persistence"
+  /bin/echo -e "${2}4:  file system=$ext4  size=the rest of device for home persistence"
+ fi
+elif [ "$ans" == "u" ]
+then
+# ----------------------------------------------------------------------
+# upgrade: create fresh file system in casper-rw but keep home-rw
+# ----------------------------------------------------------------------
+ chksum=$(sudo lsblk -l -o fstype,label "${2}"|sed 's/vfat.*/vfat/'|head -n6|md5sum)
+
+ if [ "$chksum" != "2f00c0f66a20a8ebb10e9e5a663c62fd  -" ]
+ then
+  echo "This partition structure is not correct:"
+  sudo lsblk -l -o fstype,label "${2}"|sed 's/vfat.*/vfat/'
+  echo "It should be:
+FSTYPE LABEL
+
+vfat
+ext4   isodevice
+ext4   casper-rw
+ext4   home-rw"
+  exit
+ fi
+ dd if=/dev/zero of="${2}3" bs=1024 count=1024
+ sleep 1
+ mkfs.ext4 "${2}3"
+ echo "---------------------------------------------------------------------------"
+ echo "     Use gparted to check (and maybe change) the partitions"
+ echo "---------------------------------------------------------------------------"
+else
+ echo "you should not come here"
+ exit
+fi
+
+partprobe "$2" 2> /tmp/partprobe
+sleep 1
+umount "${2}?" 2> /dev/null
+sleep 1
+umount "${2}?"
+sleep 1
+sync
+partprobe "$2" 2> /tmp/partprobe
+
+which gparted > /dev/null
+if [ $? -ne 0 ]
+then
+ echo "Installing gparted from the Ubuntu repositories"
+ sudo apt-get install gparted
+fi
+
+sudo -H gparted "$2" 2>> /dev/null
+
+partprobe "$2" 2> /tmp/partprobe
+sleep 1
+
+persist=$(grep -m1 boot= grub.cfg|sed s/.*boot=//|sed s/\ .*//)
+
+label="${source##*/}"
+label="${label/edubuntu/edu}"
+label="${label/kubuntu/kub}"
+label="${label/lubuntu/lub}"
+label="${label/mythbuntu/myb}"
+label="${label/ubuntu-budgie/ubd}"
+label="${label/ubuntu-gnome/ugn}"
+label="${label/ubuntu-mate/umt}"
+label="${label/ubuntukylin/uky}"
+label="${label/ubuntustudio/ust}"
+label="${label/xubuntu/xub}"
+label="${label/ubuntu/ubu}"
+
+label=$(echo "$label"|sed -e s/desktop// -e s/untu// -e s/LTS// -e s/\\.//g \
+ -e s/-//g -e s/amd64/-64/ -e s/i386/-32/ -e s/iso//)
+
+label=${label:0:11}
+label=${label^^}
+
+parted "$2" set 1 boot on  # set boot flag on partition 1
+sleep 0.5
+partprobe "$2" 2> /tmp/partprobe
+sleep 0.5
+dosfslabel "${2}1" "$label"
+tune2fs -L "isodevice" "${2}2"
+tune2fs -L "${persist}-rw" "${2}3"
+tune2fs -L "home-rw" "${2}4"
+tune2fs -O ^has_journal "${2}3"
+tune2fs -O ^has_journal "${2}4"
+
+echo "---------------------------------------------------------------------------"
+echo "source=$source"
+echo "---------------------------------------------------------------------------"
+
+# mountpoints
+
+mount "$part" /tmp/target
+mount "${2}2" /tmp/isotrg
+
+# install bootloaders
+
+#/bin/echo -n "UEFI Bootloader:  "
+#grub-install --force --removable --no-floppy --boot-directory=/tmp/target/boot --efi-directory=/tmp/target/EFI/BOOT "$2"
+#/bin/echo -n "BIOS Bootloader:  "
+#grub-install --force --removable --no-floppy --boot-directory=/tmp/target/boot "$2"
+
+echo "Copying files ..."
+
+# extract and copy Andre's zip-file (except grub.cfg and ini/)
+
+if ! test -d usb-pack_efi
+then
+ unzip usb-pack_efi.zip
+fi
+rsync --exclude={grub.cfg,iso} -Hav usb-pack_efi/ /tmp/target
+
+# tweak grub.cfg
+
+< grub.cfg sed '2'q > /tmp/target/boot/grub/grub.cfg  # copy two first lines
+
+error=0
+
+# append the rest of the file (after two first lines)
+ 
+mount -o loop "$source" /tmp/looper
+vmlinuz=$(ls -1 /tmp/looper/casper/|grep vmlinuz)
+
+< grub.cfg sed -e '1,2'd \
+-e "s%ubuntu.iso%${source##*/}%g" -e "s/vmlinuz/$vmlinuz/" \
+-e '/menuentry/a \ set root=(hd0,2)' -e '/menuentry/s/"./\U&/' \
+>> /tmp/target/boot/grub/grub.cfg
+
+# remove the old iso file
+
+if [ "$ans" == "u" ]
+then
+ rm /tmp/isotrg/*.iso
+fi
+
+# copy the new iso file
+
+which pv > /dev/null 2> /dev/null
+if [ $? -eq 0 ]
+then
+ echo "< $source pv > /tmp/isotrg/${source##*/}"
+ < "$source" pv > /tmp/isotrg/"${source##*/}"
+ if [ $? != 0 ]
+ then
+  error=pv
+ fi
+else
+ cp -v "$source" /tmp/isotrg
+ if [ $? != 0 ]
+ then
+  error=cp
+ fi
+fi
+umount /tmp/looper
+
+chmod ugo+r /tmp/target/boot/grub/grub.cfg
+
+if [ "$error" != "0" ]
+then
+ echo "Too small partition: '$source'"
+ echo "'$error' could not finish copying the iso file(s)"
+fi
+chmod ugo+r /tmp/isotrg/${source##*/}
+
+sync
+echo "Syncing the target device ..."
+
+# final tasks
+
+inst=0
+for i in /tmp/isotrg/*.iso
+do
+ inst=$((inst+1))
+done
+if [ $inst -gt 1 ]
+then 
+ echo " The following iso files are found in the target drive:"
+ ls -1 /tmp/isotrg/*.iso
+ echo " but there should be only one iso file i the persistent live drive"
+ exit
+fi
+partprobe "$2" 2> /tmp/partprobe
+cat /tmp/partprobe
+rm /tmp/partprobe
+sleep 1
+umount /tmp/monter /tmp/looper /tmp/target /tmp/isotrg 2> /dev/null
+sleep 1
+rm -r /tmp/monter /tmp/looper /tmp/target /tmp/isotrg
+umount "$2"1 2> /dev/null
+sleep 0.5
+umount "$2"2 2> /dev/null
+sleep 0.5
+umount "$2"3 2> /dev/null
+sleep 0.5
+umount "$2"4 2> /dev/null
+sleep 0.5
+sync
+umount "$2"1 2> /dev/null
+sleep 0.5
+umount "$2"2 2> /dev/null
+sleep 0.5
+umount "$2"3 2> /dev/null
+sleep 0.5
+umount "$2"4 2> /dev/null
+sleep 0.5
+sync
+
+df|grep "$2" > /dev/null
+if [ $? -ne 0 ]
+then
+ lsblk -o MODEL,NAME,FSTYPE,LABEL,MOUNTPOINT,SIZE "$2"
+ echo "The target device is ready to use."
+ echo "'$source' was installed"
+else
+ echo "Could not unmount the target device. Try manually!"
+fi

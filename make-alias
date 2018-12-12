@@ -1,0 +1,26 @@
+#!/bin/bash
+
+workdir="grub-n-iso_multiboot"
+grep mk-grub-n-iso ~/.bashrc
+
+if [ $? -eq 0 ]
+then
+ inbrc=true
+else
+ inbrc=false
+fi
+# echo $inbrc
+if test -f mk-grub-n-iso && [ "$(pwd|sed 's#.*/##')" == "$workdir" ] && ! $inbrc
+then
+ ./about
+ echo "alias mkgni='cd \"$(pwd)\";./mk-grub-n-iso \$*'" >> ~/.bashrc
+
+ echo "the alias 'mkgni' should be created, and"
+ echo "available in the next terminal window, that you open"
+elif $inbrc
+then
+ echo "the alias 'mkgni' is already available in ~/.bashrc"
+else
+ echo "Run this command from the directory '$workdir'"
+ echo "where all the files for mk-grub-n-iso are located."
+fi

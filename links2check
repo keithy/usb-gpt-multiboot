@@ -1,0 +1,286 @@
+#!/bin/bash
+
+# links2check by sudodus alias Nio Wiklund at Launchpad
+#
+# DATE        SIGN     COMMENT
+# 2015-06-26  sudodus  created in order to manage isofiles for iso-testing
+#                      desktop iso files boot with the 'grub-n-iso' method
+#                      Lubuntu_alternate and Ubuntu_Server can be managed
+#                      here, but must be installed by another method for
+#                      example with mkusb-nox which is supplied
+#                      version 1.0
+# 2015-07-24  sudodus  fixed output for files that do not boot via 'grub-n-iso'
+#                      added option -v (verbose) to rsync
+#                      version 1.1
+
+
+LANG=C
+curdir=$(pwd)
+ans=
+choice=
+cmd=
+menutxt=
+stem="\
+Link_to_targets_in the_current_directory
+Ubuntu             http://cdimage.ubuntu.com/daily-live/current/
+Edubuntu           http://cdimage.ubuntu.com/edubuntu/dvd/current/
+Kubuntu            http://cdimage.ubuntu.com/kubuntu/daily-live/current/
+Lubuntu_desktop    http://cdimage.ubuntu.com/lubuntu/daily-live/current/
+Lubuntu_alternate  http://cdimage.ubuntu.com/lubuntu/daily/current/
+Mythbuntu          http://cdimage.ubuntu.com/mythbuntu/daily-live/current/
+Ubuntu_Gnome       http://cdimage.ubuntu.com/ubuntu-gnome/daily-live/current/
+Ubuntu_Mate        http://cdimage.ubuntu.com/ubuntu-mate/daily-live/current/
+Ubuntu_Server      http://cdimage.ubuntu.com/ubuntu-server/daily/current/
+Ubuntu_Kylin       http://cdimage.ubuntu.com/ubuntukylin/daily-live/current/
+Ubuntu_Studio      http://cdimage.ubuntu.com/ubuntustudio/dvd/current/
+Xubuntu            http://cdimage.ubuntu.com/xubuntu/daily-live/current/
+Link_to_targets_in the_current_directory
+"
+# These debian-installer iso files boot via grub, but cannot mount the CDROM,
+# so they cannot be used in a grub-n-iso pendrive. They work when installed
+# directly into CD disks and USB pendrives via for example mkusb.
+#
+# Lubuntu_alternate  http://cdimage.ubuntu.com/lubuntu/daily/current/
+# Ubuntu_Server      http://cdimage.ubuntu.com/ubuntu-server/daily/current/
+
+function getiso {
+
+ if [ "$1" == "action" ]
+ then
+  menutxt="Select an item from the list below to 'download' or 'check' an ISO file"
+ else
+  menutxt="Select an item from the list below to 'check' if the ISO file exists.
+Click on the 'OK' button without any selected item to skip the ISO test, but
+continue checking for MD5SUMS files. Click on 'Cancel' to stop the whole testing."
+ fi
+ lpat="${ans%/*}"
+ lpat="${lpat#*://}"
+
+ rm -f ${lpat}/MD5SUMS
+ sleep 0.1
+ sync
+ wget -r ${ans}MD5SUMS 2>&1 |grep ".MD5SUMS. saved"
+ if [ $? -eq 0 ]
+ then
+#  echo "md5sums for $ans"
+#  cat MD5SUMS
+#  echo "url(s) to get the $ans iso file(s)"
+
+  cd "$lpat"
+  isos=
+  for j in $(cat MD5SUMS|sed 's/.* \*//')
+  do
+   isos="$isos
+$ans$j"
+  done
+#  echo "$isos"
+  choice=$(zenity --list --width=660 --height=330 \
+  --text="$menutxt" \
+  --column="Ubuntu flavour ISO file to test" $isos 2>/dev/null)
+  if [ $? -ne 0 ]
+  then
+   echo "cancel"
+   cd "$curdir"
+   exit
+  elif [ "$choice" == "" ]
+  then
+   echo "skip"
+  else
+   choice=${choice%|*}   # fix for buggy(?) zenity --list in trusty
+
+   grep "${choice##*/}" MD5SUMS>md5sum-now
+#   cat md5sum-now
+
+   echo -n 'md5sum check of iso file: '
+   md5sum -c md5sum-now 2> /dev/null
+   if [ $? -ne 0 ]
+   then
+    cmd=$(echo $choice|sed 's#cdimage.ubuntu.com#cdimage.ubuntu.com/cdimage#')
+    cmd="${cmd/http/rsync -tzhhvPL rsync} ."
+    echo "${cmd/tzhhvPL/tzhhvPLn}"
+    if [ "$1" == "action" ]
+    then
+     echo "ACTION"
+#           echo ${cmd} > "${choice##*/}"  # testing with dummy file
+     ${cmd}
+     md5sum -c md5sum-now 2> /dev/null
+    else
+     echo -n "DRY RUN"
+     ${cmd/tzhhvPL/tzhhvPLn}  # n DRY RUN
+    fi
+   else
+    echo "${choice} is up to date"
+   fi
+  fi
+ else
+  echo "${ans}MD5SUMS file not found !!!"
+ fi
+}
+
+########################################################################
+
+function tweak_grub {
+
+# tweak_grub $i $ftarg
+# $i iso file
+# $ftarg link name
+
+ if ! test -f grub-final.cfg
+ then
+  < grub.cfg sed '2'q > grub-final.cfg  # copy two first lines
+ fi
+
+# append the rest of the file (after two first lines)
+
+ if [ "${i/amd64}" != "$i" ]
+ then
+  vmlinuz=vmlinuz.efi
+ else
+  vmlinuz=vmlinuz
+ fi
+
+ < grub.cfg sed -e '1,2'd \
+ -e /menuentry/"s%ubuntu.iso%${ftarg^}%" \
+ -e "s%ubuntu.iso%${i}%g" -e "s/vmlinuz/$vmlinuz/" \
+ -e '/menuentry/a \ set root=(hd0,2)' \
+ >> grub-final.cfg
+}
+
+########################################################################
+#
+#   main
+#
+########################################################################
+
+if [ "$(pwd)" == "/isodevice" ] && [ "$(whoami)" != "root" ]
+then
+ echo "Here in '/isodevice' you need superuser permissions"
+ echo "sudo -H $0"
+ exit
+fi
+which zenity 2> /dev/null
+if [ $? -ne 0 ]
+then
+ apt-get install zenity
+fi
+ans=$(zenity --list --width=640 --height=500 --print-column=2 \
+--title="'Grub-n-ISO' - Ubuntu flavours for iso testing" \
+--text="Select an item from the list below to download or update one ISO file.
+Click on the OK button without any selected item to test if they exist." \
+--column="Name" \
+--column="===== URL directories for the corresponding ISO files =====" \
+$stem 2>/dev/null)
+
+if [ $? -ne 0 ]
+then
+ echo "cancel"
+ cd "$curdir"
+ exit
+fi
+#echo $ans
+ans=${ans%|*}   # fix for buggy(?) zenity --list in trusty
+#echo $ans
+
+if [ "$ans" == "" ]
+then
+
+# checking that the MD5SUMS and iso files exist
+
+ echo "Default: $0      # checking that the MD5SUMS exist"
+ for i in $(echo "$stem"|tr -s ' ' ' '|cut -d ' ' -f 2)
+ do
+  if [ "$i" != "the_current_directory" ]
+  then
+   echo "-----------------------------------------------------------------------------"
+   echo -n "${i}MD5SUMS"
+   wget --spider ${i}MD5SUMS 2>&1 |grep 'Remote file exists.' >/dev/null
+   if [ $? -eq 0 ]
+   then
+    echo "     OK"
+    ans=$i
+    getiso "dry run"
+    cd "$curdir"
+   else
+    echo '  Remote file not found'
+   fi
+   sleep 0.1
+  fi
+ done
+elif [ "$ans" == "the_current_directory" ]
+then
+
+# Link_to_targets_in the_current_directory
+
+ if test -f grub.cfg
+ then
+  echo "Using template 'grub.cfg' in the current directory"
+  rm -f grub-final.cfg
+ else
+  echo "Template 'grub.cfg' not found in the current directory"
+  exit
+ fi
+ 
+ cnt=0
+ cnu=0
+ cnx=0
+
+# write grub entries for regular iso files
+
+ for i in $(find -maxdepth 1 -type f -name "*.iso"|sed 's%^./%%')
+ do
+  ftarg=${i##*/}
+  tweak_grub $i $ftarg
+  cnu=$(( cnu + 1 ))
+ done  
+
+# write grub entries for daily iso files
+ 
+ for i in $(find cdimage.ubuntu.com -type f -name "*.iso") 
+ do
+ftarg=$(echo ${i/cdimage.ubuntu.com\/}|sed s#/\.*/#-#)
+if [ "${i/daily-live}" != "$i" ]
+then
+  if [ "${ftarg/daily-live}" != "$ftarg" ]
+  then
+   ftarg="${ftarg/daily-live/ubuntu}"
+  fi
+  ln -fsv $i $ftarg
+  tweak_grub $i $ftarg
+  cnt=$(( cnt + 1 ))
+else
+ echo "($ftarg' does not boot via 'grub-n-iso')"
+ echo "(but you can store it here and use 'mkusb-nox' to make a boot drive)"
+ cnx=$(( cnx + 1 ))
+fi
+ done
+ 
+# present results and copy grub.cfg to boot directory
+
+ echo "$cnt linked daily iso file(s)   - with grub menuentries"
+ echo "$cnu linked regular iso file(s) - with grub menuentries"
+ echo "$cnx iso file(s) that cannot be booted by the 'grub-n-iso' method"
+
+ if [ "$(pwd)" == "/isodevice" ]
+ then
+  part=$(df .|grep " /isodevice$" |cut -b 1-8)1
+  tmpdir=$(mktemp -d)
+  mount "$part" "$tmpdir"
+  sudo cp grub-final.cfg $tmpdir/boot/grub/grub.cfg
+  umount "$tmpdir"  
+ else
+  tgdir="$(pwd)"
+  echo "---------------------------------------------------------------"
+  echo "The grub-final.cfg file is written in the current directory,"
+  echo "but does not work here. You must copy it manually to the boot"
+  echo "directory of the grub-n-iso PENDRIVE's first partition:"
+  echo " "
+  echo "sudo cp grub-final.cfg 'mountpoint'/boot/grub/grub.cfg"
+  echo " "
+ fi
+else
+
+# Download or update iso file
+
+ getiso "action"
+ cd "$curdir"
+fi
